@@ -306,10 +306,8 @@ DAILY_FREE_LIMIT = 3  # 每日免費次數
 user_usage = {}  # {user_id: {"date": "2024-02-01", "count": 3}}
 
 # ===== VIP 白名單（無限使用）=====
-# 把你的 Line User ID 加在這裡
 VIP_USERS = [
-    # 你的 User ID 會在 Render Logs 中顯示
-    # 格式像是：U1234567890abcdef...
+    "Udeaa0f5c895dab6687136227a44e0c0a",  # 管理員
 ]
 
 def check_usage_limit(user_id: str) -> tuple:
@@ -621,11 +619,6 @@ def handle_text_message(event: MessageEvent):
     # 檢查是否在選牌階段
     if user_id in user_states and user_states[user_id].get("mode") == "selecting":
         handle_card_selection(event, user_id, user_message)
-        return
-    
-    # 特殊指令：查看自己的 User ID（管理員用）
-    if user_message == "我的ID" or user_message == "myid":
-        reply_with_quick_actions(event, f"🔑 你的 User ID：\n\n{user_id}\n\n請將此 ID 提供給管理員開通 VIP。")
         return
     
     # 判斷回覆模式
