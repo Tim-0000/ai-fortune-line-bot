@@ -64,18 +64,19 @@ WELCOME_MESSAGE = """🔮 歡迎來到【玄天上師】命理殿堂
 ━━━━━━━━━━━━━━━━
 📖 使用方式：
 
+⭐ 今日運勢（每日必看）
+   → 今日運勢
+
 🌟 直接提問（快速回覆）
    → 我最近財運如何？
 
 🎴 塔羅占卜（抽牌互動）
    → 占卜 感情運勢
-   → 抽牌
 
 🖼️ 附圖回覆（較慢）
    → 要圖 事業運勢
 
-❓ 查看說明
-   → 說明
+❓ 查看說明 → 說明
 ━━━━━━━━━━━━━━━━
 
 施主有何疑惑，儘管道來。"""
@@ -84,29 +85,29 @@ WELCOME_MESSAGE = """🔮 歡迎來到【玄天上師】命理殿堂
 HELP_MESSAGE = """📖 【玄天上師】使用說明
 
 ━━━━━━━━━━━━━━━━
+⭐ 每日幸運指數（秒回！）
+輸入「今日運勢」獲得：
+• 今日幸運指數 ⭐⭐⭐⭐⭐
+• 幸運數字 & 幸運顏色
+• 每日開運小提醒
+
+━━━━━━━━━━━━━━━━
 🌟 一般問命（純文字，秒回）
 直接輸入問題即可：
 • 我最近運勢如何？
 • 感情方面有什麼建議？
-• 今年事業運怎麼樣？
 
 ━━━━━━━━━━━━━━━━
 🎴 塔羅牌占卜（抽牌互動）
-輸入「占卜」或「抽牌」+問題：
+輸入「占卜」+問題：
 • 占卜 我的感情運
-• 抽牌 財運如何
-• 占卜
-
-系統會抽出三張牌讓你選擇，
-選牌後揭曉命運並生成專屬圖片。
+• 抽牌
 
 ━━━━━━━━━━━━━━━━
 🖼️ 圖文模式（附 AI 繪圖）
-輸入「要圖」或「圖文」+問題：
+輸入「要圖」+問題：
 • 要圖 我的財運
-• 圖文 感情建議
-
-⚠️ 圖片生成需 15-20 秒
+⚠️ 需等待 15-20 秒
 
 ━━━━━━━━━━━━━━━━
 祝施主心想事成 🙏"""
@@ -151,6 +152,35 @@ TAROT_SYSTEM_PROMPT = """你是一位神祕的塔羅牌占卜師，名為「玄�
 }
 
 請務必只回傳 JSON 格式，不要有其他文字。"""
+
+# 每日幸運指數 System Prompt
+DAILY_FORTUNE_PROMPT = """你是一位神祕的命理大師「玄天上師」，現在要為使用者提供今日運勢。
+
+請根據當下的時間能量，為使用者生成今日運勢。你必須回傳一個 JSON 格式，包含以下欄位：
+1. "overall_stars": 整體運勢星數（1-5的整數）
+2. "love_stars": 感情運星數（1-5的整數）
+3. "wealth_stars": 財運星數（1-5的整數）
+4. "work_stars": 事業運星數（1-5的整數）
+5. "lucky_number": 幸運數字（1-99之間）
+6. "lucky_color": 幸運顏色（繁體中文，如：金色、紫色、天藍色）
+7. "lucky_direction": 幸運方位（如：東方、西南方）
+8. "advice": 今日開運提醒（約50-80字，要有神祕感和智慧感，給予具體建議）
+9. "warning": 今日注意事項（約20-30字，提醒要避免的事情）
+
+範例輸出格式：
+{
+  "overall_stars": 4,
+  "love_stars": 5,
+  "wealth_stars": 3,
+  "work_stars": 4,
+  "lucky_number": 7,
+  "lucky_color": "金色",
+  "lucky_direction": "東方",
+  "advice": "今日紫氣東來，適合主動出擊...",
+  "warning": "避免與人爭執，退一步海闊天空"
+}
+
+請務必只回傳 JSON 格式，不要有其他文字。每次生成的內容都要不同，有變化。"""
 
 # ===== 錯誤回覆訊息 =====
 ERROR_MESSAGE = "🔮 天機訊號干擾中，請稍後再試。"
@@ -226,6 +256,10 @@ def get_reply_mode(message: str) -> str:
     if any(keyword in message for keyword in ["說明", "幫助", "help", "指令", "怎麼用"]):
         return "help"
     
+    # 每日幸運指數
+    if any(keyword in message for keyword in ["今日運勢", "今天運勢", "每日運勢", "今日", "今天運氣", "幸運指數"]):
+        return "daily_fortune"
+    
     # 塔羅牌模式
     if any(keyword in message for keyword in ["抽牌", "塔羅", "占卜", "抽籤", "抽卡"]):
         return "tarot"
@@ -240,6 +274,45 @@ def get_reply_mode(message: str) -> str:
     
     # 預設：純文字（較快）
     return "text_only"
+
+
+def get_daily_fortune() -> dict:
+    """
+    呼叫 OpenAI 生成每日幸運指數
+    """
+    try:
+        from datetime import datetime
+        today = datetime.now().strftime("%Y年%m月%d日")
+        
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": DAILY_FORTUNE_PROMPT},
+                {"role": "user", "content": f"請為今天（{today}）生成運勢"}
+            ],
+            temperature=0.9,
+            max_tokens=400
+        )
+        
+        response_text = response.choices[0].message.content.strip()
+        
+        # 解析 JSON
+        cleaned_text = re.sub(r'^```json\s*', '', response_text)
+        cleaned_text = re.sub(r'\s*```$', '', cleaned_text)
+        
+        result = json.loads(cleaned_text)
+        return result
+    
+    except Exception as e:
+        print(f"每日運勢錯誤: {e}")
+        return None
+
+
+def format_stars(count: int) -> str:
+    """
+    將數字轉換成星星符號
+    """
+    return "⭐" * count + "☆" * (5 - count)
 
 
 def draw_three_cards() -> list:
@@ -301,6 +374,9 @@ def handle_text_message(event: MessageEvent):
     if mode == "help":
         # 顯示使用說明
         reply_with_quick_actions(event, HELP_MESSAGE)
+    elif mode == "daily_fortune":
+        # 每日幸運指數
+        handle_daily_fortune(event)
     elif mode == "tarot":
         # 塔羅牌模式
         start_tarot_reading(event, user_id, user_message)
@@ -312,13 +388,66 @@ def handle_text_message(event: MessageEvent):
         handle_full_mode(event, user_message)
 
 
+def handle_daily_fortune(event):
+    """
+    處理每日幸運指數
+    """
+    from datetime import datetime
+    today = datetime.now().strftime("%m/%d")
+    
+    fortune = get_daily_fortune()
+    
+    if fortune is None:
+        reply_with_quick_actions(event, ERROR_MESSAGE)
+        return
+    
+    # 格式化回覆
+    reply_text = f"""🌅 【{today} 今日運勢】
+
+━━━━ 運勢指數 ━━━━
+✨ 整體運勢：{format_stars(fortune.get('overall_stars', 3))}
+💕 感情運勢：{format_stars(fortune.get('love_stars', 3))}
+💰 財運指數：{format_stars(fortune.get('wealth_stars', 3))}
+💼 事業運勢：{format_stars(fortune.get('work_stars', 3))}
+
+━━━━ 幸運密碼 ━━━━
+🔢 幸運數字：{fortune.get('lucky_number', 7)}
+🎨 幸運顏色：{fortune.get('lucky_color', '金色')}
+🧭 幸運方位：{fortune.get('lucky_direction', '東方')}
+
+━━━━ 今日提醒 ━━━━
+💡 {fortune.get('advice', '今日宜靜心養氣，待機而動。')}
+
+⚠️ {fortune.get('warning', '避免衝動行事')}
+
+━━━━━━━━━━━━━━━━
+🔮 想深入了解請輸入具體問題"""
+    
+    # 加上快速操作按鈕
+    quick_reply = QuickReply(items=[
+        QuickReplyItem(action=MessageAction(label="🎴 塔羅占卜", text="占卜")),
+        QuickReplyItem(action=MessageAction(label="💰 問財運", text="我的財運如何？")),
+        QuickReplyItem(action=MessageAction(label="💕 問感情", text="我的感情運如何？")),
+        QuickReplyItem(action=MessageAction(label="💼 問事業", text="我的事業運如何？")),
+    ])
+    
+    with ApiClient(configuration) as api_client:
+        messaging_api = MessagingApi(api_client)
+        messaging_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text, quick_reply=quick_reply)]
+            )
+        )
+
+
 def reply_with_quick_actions(event, text: str):
     """
     回覆訊息並附上快速操作按鈕
     """
     quick_reply = QuickReply(items=[
+        QuickReplyItem(action=MessageAction(label="⭐ 今日運勢", text="今日運勢")),
         QuickReplyItem(action=MessageAction(label="🎴 塔羅占卜", text="占卜")),
-        QuickReplyItem(action=MessageAction(label="🌟 問運勢", text="我最近運勢如何？")),
         QuickReplyItem(action=MessageAction(label="💰 問財運", text="我的財運如何？")),
         QuickReplyItem(action=MessageAction(label="💕 問感情", text="我的感情運如何？")),
     ])
@@ -454,9 +583,9 @@ def handle_text_only(event, user_message: str):
     
     # 加上快速操作
     quick_reply = QuickReply(items=[
+        QuickReplyItem(action=MessageAction(label="⭐ 今日運勢", text="今日運勢")),
         QuickReplyItem(action=MessageAction(label="🎴 塔羅占卜", text="占卜")),
         QuickReplyItem(action=MessageAction(label="🖼️ 附圖回覆", text=f"要圖 {user_message}")),
-        QuickReplyItem(action=MessageAction(label="💕 問感情", text="我的感情運如何？")),
     ])
     
     with ApiClient(configuration) as api_client:
