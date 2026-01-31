@@ -136,8 +136,9 @@ def generate_image(prompt: str) -> str:
         )
         
         # output 是一個列表，取第一張圖片的 URL
+        # 確保轉換為字串（Replicate 可能返回 FileOutput 對象）
         if output and len(output) > 0:
-            return output[0]
+            return str(output[0])
         return None
     
     except Exception as e:
