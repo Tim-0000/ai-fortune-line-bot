@@ -2,11 +2,13 @@
 """
 AI 命理大師 Line Bot
 整合 OpenAI GPT + Replicate 圖片生成
+支援塔羅牌占卜模式
 """
 
 import os
 import json
 import re
+import random
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 
@@ -18,7 +20,12 @@ from linebot.v3.messaging import (
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
-    ImageMessage
+    ImageMessage,
+    TemplateMessage,
+    ButtonsTemplate,
+    MessageAction,
+    QuickReply,
+    QuickReplyItem
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from linebot.v3.exceptions import InvalidSignatureError
@@ -47,7 +54,14 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # ===== 初始化 OpenAI =====
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# 設定命理大師的 System Prompt
+# ===== 塔羅牌定義 =====
+TAROT_CARDS = [
+    "愚者", "魔術師", "女祭司", "皇后", "皇帝", "教皇", "戀人", "戰車",
+    "力量", "隱者", "命運之輪", "正義", "倒吊人", "死神", "節制", "惡魔",
+    "高塔", "星星", "月亮", "太陽", "審判", "世界"
+]
+
+# 設定命理大師的 System Prompt（一般模式）
 MASTER_SYSTEM_PROMPT = """你是一位神祕且充滿智慧的命理大師，名為「玄天上師」。
 你擅長用譬喻和溫暖的口吻為人解惑，語氣帶有古典韻味但不失親切。
 
@@ -65,26 +79,38 @@ MASTER_SYSTEM_PROMPT = """你是一位神祕且充滿智慧的命理大師，名
 
 請務必只回傳 JSON 格式，不要有其他文字。"""
 
+# 塔羅牌解讀 System Prompt
+TAROT_SYSTEM_PROMPT = """你是一位神祕的塔羅牌占卜師，名為「玄天上師」。
+使用者抽到了一張塔羅牌，請根據牌面和他們的問題給予解讀。
+
+你必須回傳一個 JSON 格式的回應，包含兩個欄位：
+1. "reply": 給使用者的繁體中文塔羅牌解讀（約150-200字），要有神祕感，先描述牌的意義，再結合問題給予建議
+2. "image_prompt": 給 AI 繪圖用的英文提示詞，描述這張塔羅牌的畫面（約30-50字），風格要神祕、東方玄學、賽博龐克混合
+
+範例輸出格式：
+{
+  "reply": "你抽到了「命運之輪」，此牌象徵著命運的轉動...",
+  "image_prompt": "A mystical Wheel of Fortune tarot card, glowing with golden light, cyberpunk oriental style, ethereal atmosphere"
+}
+
+請務必只回傳 JSON 格式，不要有其他文字。"""
+
 # ===== 錯誤回覆訊息 =====
 ERROR_MESSAGE = "🔮 天機訊號干擾中，請稍後再試。"
 
+# ===== 使用者狀態儲存（簡易版，重啟會清空）=====
+user_states = {}  # {user_id: {"mode": "tarot", "question": "...", "cards": [...]}}
 
-def ask_openai(user_message: str) -> dict:
+
+def ask_openai(user_message: str, system_prompt: str = MASTER_SYSTEM_PROMPT) -> dict:
     """
-    呼叫 OpenAI GPT 生成命理回覆與圖片提示詞
-    
-    Args:
-        user_message: 使用者的問題
-    
-    Returns:
-        dict: 包含 reply (中文回覆) 和 image_prompt (英文提示詞)
+    呼叫 OpenAI GPT 生成回覆
     """
     try:
-        # 發送訊息給 OpenAI
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": MASTER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
             ],
             temperature=0.8,
@@ -93,8 +119,7 @@ def ask_openai(user_message: str) -> dict:
         
         response_text = response.choices[0].message.content.strip()
         
-        # 嘗試解析 JSON（處理可能的 markdown 格式）
-        # 移除可能的 ```json 和 ``` 標記
+        # 解析 JSON
         cleaned_text = re.sub(r'^```json\s*', '', response_text)
         cleaned_text = re.sub(r'\s*```$', '', cleaned_text)
         
@@ -109,18 +134,10 @@ def ask_openai(user_message: str) -> dict:
 def generate_image(prompt: str) -> str:
     """
     使用 Replicate 呼叫 SDXL 模型生成圖片
-    
-    Args:
-        prompt: 英文圖片提示詞
-    
-    Returns:
-        str: 生成的圖片 URL，失敗則回傳 None
     """
     try:
-        # 設定 Replicate API Token
         os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
         
-        # 呼叫 SDXL 模型生成圖片
         output = replicate.run(
             "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
             input={
@@ -135,8 +152,6 @@ def generate_image(prompt: str) -> str:
             }
         )
         
-        # output 是一個列表，取第一張圖片的 URL
-        # 確保轉換為字串（Replicate 可能返回 FileOutput 對象）
         if output and len(output) > 0:
             return str(output[0])
         return None
@@ -146,21 +161,42 @@ def generate_image(prompt: str) -> str:
         return None
 
 
+def get_reply_mode(message: str) -> str:
+    """
+    判斷使用者要的回覆模式
+    """
+    message_lower = message.lower()
+    
+    # 塔羅牌模式
+    if any(keyword in message for keyword in ["抽牌", "塔羅", "占卜", "抽籤", "抽卡"]):
+        return "tarot"
+    
+    # 純文字模式
+    if any(keyword in message for keyword in ["純文字", "快速", "文字就好", "不要圖"]):
+        return "text_only"
+    
+    # 圖文模式
+    if any(keyword in message for keyword in ["要圖", "圖文", "完整", "附圖"]):
+        return "full"
+    
+    # 預設：純文字（較快）
+    return "text_only"
+
+
+def draw_three_cards() -> list:
+    """
+    抽三張不重複的塔羅牌
+    """
+    return random.sample(TAROT_CARDS, 3)
+
+
 # ===== Line Webhook 端點 =====
 @app.route("/callback", methods=["POST"])
 def callback():
-    """
-    Line Webhook 回呼端點
-    驗證簽章並處理訊息事件
-    """
-    # 取得 X-Line-Signature 標頭
     signature = request.headers.get("X-Line-Signature", "")
-    
-    # 取得請求內容
     body = request.get_data(as_text=True)
     app.logger.info(f"收到請求: {body}")
     
-    # 驗證簽章並處理事件
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -174,56 +210,188 @@ def callback():
 def handle_text_message(event: MessageEvent):
     """
     處理文字訊息事件
-    1. 接收使用者訊息
-    2. 呼叫 OpenAI 生成回覆和圖片提示詞
-    3. 呼叫 Replicate 生成圖片
-    4. 回傳文字 + 圖片給使用者
     """
-    # 取得使用者傳送的文字
-    user_message = event.message.text
-    app.logger.info(f"使用者訊息: {user_message}")
+    user_id = event.source.user_id
+    user_message = event.message.text.strip()
+    app.logger.info(f"使用者 {user_id} 訊息: {user_message}")
     
-    # 呼叫 OpenAI 取得回覆
-    ai_result = ask_openai(user_message)
-    
-    # 如果 OpenAI 失敗，回傳錯誤訊息
-    if ai_result is None:
-        reply_user(event.reply_token, ERROR_MESSAGE, None)
+    # 檢查是否在選牌階段
+    if user_id in user_states and user_states[user_id].get("mode") == "selecting":
+        handle_card_selection(event, user_id, user_message)
         return
     
-    # 取得文字回覆和圖片提示詞
+    # 判斷回覆模式
+    mode = get_reply_mode(user_message)
+    
+    if mode == "tarot":
+        # 塔羅牌模式：顯示三張牌讓使用者選
+        start_tarot_reading(event, user_id, user_message)
+    elif mode == "text_only":
+        # 純文字模式
+        handle_text_only(event, user_message)
+    else:
+        # 完整圖文模式
+        handle_full_mode(event, user_message)
+
+
+def start_tarot_reading(event, user_id: str, question: str):
+    """
+    開始塔羅牌占卜：抽三張牌讓使用者選
+    """
+    # 抽三張牌
+    cards = draw_three_cards()
+    
+    # 儲存使用者狀態
+    # 移除關鍵字，保留問題本身
+    clean_question = question
+    for keyword in ["抽牌", "塔羅", "占卜", "抽籤", "抽卡"]:
+        clean_question = clean_question.replace(keyword, "").strip()
+    if not clean_question:
+        clean_question = "我的運勢"
+    
+    user_states[user_id] = {
+        "mode": "selecting",
+        "question": clean_question,
+        "cards": cards
+    }
+    
+    # 建立選牌訊息
+    reply_text = f"""🔮 塔羅牌占卜開始...
+
+吾已為汝抽出三張命運之牌，請憑直覺選擇一張：
+
+🃏 第一張牌
+🃏 第二張牌  
+🃏 第三張牌
+
+請輸入「1」「2」或「3」選擇你的命運之牌。"""
+    
+    # 使用 Quick Reply 讓選擇更方便
+    quick_reply = QuickReply(items=[
+        QuickReplyItem(action=MessageAction(label="🃏 第一張", text="1")),
+        QuickReplyItem(action=MessageAction(label="🃏 第二張", text="2")),
+        QuickReplyItem(action=MessageAction(label="🃏 第三張", text="3")),
+    ])
+    
+    with ApiClient(configuration) as api_client:
+        messaging_api = MessagingApi(api_client)
+        messaging_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text, quick_reply=quick_reply)]
+            )
+        )
+
+
+def handle_card_selection(event, user_id: str, selection: str):
+    """
+    處理使用者選牌
+    """
+    state = user_states.get(user_id)
+    if not state:
+        reply_simple(event, "請先輸入「占卜」開始抽牌。")
+        return
+    
+    # 解析選擇
+    try:
+        choice = int(selection) - 1
+        if choice < 0 or choice > 2:
+            raise ValueError()
+    except:
+        reply_simple(event, "請輸入 1、2 或 3 來選擇牌。")
+        return
+    
+    # 取得選中的牌
+    selected_card = state["cards"][choice]
+    question = state["question"]
+    
+    # 清除使用者狀態
+    del user_states[user_id]
+    
+    # 呼叫 AI 解讀塔羅牌
+    prompt = f"使用者的問題是：「{question}」\n抽到的塔羅牌是：「{selected_card}」\n請給予塔羅牌解讀。"
+    
+    ai_result = ask_openai(prompt, TAROT_SYSTEM_PROMPT)
+    
+    if ai_result is None:
+        reply_simple(event, ERROR_MESSAGE)
+        return
+    
     text_reply = ai_result.get("reply", ERROR_MESSAGE)
     image_prompt = ai_result.get("image_prompt", "")
     
-    app.logger.info(f"AI 回覆: {text_reply}")
-    app.logger.info(f"圖片提示詞: {image_prompt}")
+    # 加上牌面資訊
+    full_reply = f"🎴 你選擇了第 {choice + 1} 張牌\n\n✨ 【{selected_card}】✨\n\n{text_reply}"
     
-    # 呼叫 Replicate 生成圖片
+    # 生成圖片
     image_url = None
     if image_prompt:
         image_url = generate_image(image_prompt)
-        app.logger.info(f"生成圖片 URL: {image_url}")
     
-    # 回傳訊息給使用者
+    reply_user(event.reply_token, full_reply, image_url)
+
+
+def handle_text_only(event, user_message: str):
+    """
+    純文字模式（快速回覆）
+    """
+    ai_result = ask_openai(user_message)
+    
+    if ai_result is None:
+        reply_simple(event, ERROR_MESSAGE)
+        return
+    
+    text_reply = ai_result.get("reply", ERROR_MESSAGE)
+    
+    # 加上提示
+    text_reply += "\n\n💡 想要附圖請說「要圖」，想抽塔羅牌請說「占卜」"
+    
+    reply_simple(event, text_reply)
+
+
+def handle_full_mode(event, user_message: str):
+    """
+    完整圖文模式
+    """
+    ai_result = ask_openai(user_message)
+    
+    if ai_result is None:
+        reply_simple(event, ERROR_MESSAGE)
+        return
+    
+    text_reply = ai_result.get("reply", ERROR_MESSAGE)
+    image_prompt = ai_result.get("image_prompt", "")
+    
+    image_url = None
+    if image_prompt:
+        image_url = generate_image(image_prompt)
+    
     reply_user(event.reply_token, text_reply, image_url)
+
+
+def reply_simple(event, text: str):
+    """
+    簡單文字回覆
+    """
+    with ApiClient(configuration) as api_client:
+        messaging_api = MessagingApi(api_client)
+        messaging_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=text)]
+            )
+        )
 
 
 def reply_user(reply_token: str, text: str, image_url: str = None):
     """
-    回傳訊息給 Line 使用者
-    
-    Args:
-        reply_token: Line 回覆 token
-        text: 文字訊息
-        image_url: 圖片 URL（可選）
+    回傳訊息給 Line 使用者（支援圖片）
     """
     with ApiClient(configuration) as api_client:
         messaging_api = MessagingApi(api_client)
         
-        # 準備訊息列表
         messages = [TextMessage(text=text)]
         
-        # 如果有圖片 URL，加入圖片訊息
         if image_url:
             messages.append(
                 ImageMessage(
@@ -232,7 +400,6 @@ def reply_user(reply_token: str, text: str, image_url: str = None):
                 )
             )
         
-        # 發送回覆
         try:
             messaging_api.reply_message(
                 ReplyMessageRequest(
@@ -247,9 +414,6 @@ def reply_user(reply_token: str, text: str, image_url: str = None):
 # ===== 健康檢查端點 =====
 @app.route("/", methods=["GET"])
 def health_check():
-    """
-    健康檢查端點，用於確認服務運行狀態
-    """
     return "🔮 AI 命理大師運行中..."
 
 
