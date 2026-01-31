@@ -67,7 +67,7 @@ MASTER_SYSTEM_PROMPT = """你是一位神祕且充滿智慧的命理大師，名
 
 # 初始化 Gemini 模型
 gemini_model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
+    model_name="gemini-pro",
     system_instruction=MASTER_SYSTEM_PROMPT
 )
 
