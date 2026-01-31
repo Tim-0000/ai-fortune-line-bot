@@ -188,6 +188,64 @@ ERROR_MESSAGE = "🔮 天機訊號干擾中，請稍後再試。"
 # ===== 使用者狀態儲存 =====
 user_states = {}
 
+# ===== 每日使用次數限制 =====
+DAILY_FREE_LIMIT = 3  # 每日免費次數
+user_usage = {}  # {user_id: {"date": "2024-02-01", "count": 3}}
+
+def check_usage_limit(user_id: str) -> tuple:
+    """
+    檢查使用者是否超過每日限制
+    Returns: (是否可用, 剩餘次數)
+    """
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if user_id not in user_usage:
+        user_usage[user_id] = {"date": today, "count": 0}
+    
+    user_data = user_usage[user_id]
+    
+    # 如果是新的一天，重置次數
+    if user_data["date"] != today:
+        user_usage[user_id] = {"date": today, "count": 0}
+        user_data = user_usage[user_id]
+    
+    remaining = DAILY_FREE_LIMIT - user_data["count"]
+    return (remaining > 0, remaining)
+
+def increment_usage(user_id: str):
+    """
+    增加使用者的使用次數
+    """
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if user_id not in user_usage:
+        user_usage[user_id] = {"date": today, "count": 0}
+    
+    if user_usage[user_id]["date"] != today:
+        user_usage[user_id] = {"date": today, "count": 0}
+    
+    user_usage[user_id]["count"] += 1
+
+# 超過限制的提示訊息
+LIMIT_MESSAGE = """⚠️ 今日免費次數已用完
+
+施主今日的 3 次免費問卜已使用完畢。
+
+🌙 明日子時（00:00）將重置次數
+
+━━━━━━━━━━━━━━━━
+💎 想要無限使用？
+
+未來將開放 VIP 訂閱方案，
+敬請期待！
+
+━━━━━━━━━━━━━━━━
+📌 免費功能仍可使用：
+• 查看說明 → 輸入「說明」
+"""
+
 
 def ask_openai(user_message: str, system_prompt: str = MASTER_SYSTEM_PROMPT) -> dict:
     """
@@ -371,24 +429,35 @@ def handle_text_message(event: MessageEvent):
     # 判斷回覆模式
     mode = get_reply_mode(user_message)
     
+    # 免費功能（不計次數）
     if mode == "help":
-        # 顯示使用說明
         reply_with_quick_actions(event, HELP_MESSAGE)
-    elif mode == "daily_fortune":
-        # 每日幸運指數
-        handle_daily_fortune(event)
+        return
+    
+    # 付費功能（檢查次數限制）
+    can_use, remaining = check_usage_limit(user_id)
+    
+    if not can_use:
+        # 超過限制，顯示提示
+        reply_with_quick_actions(event, LIMIT_MESSAGE)
+        return
+    
+    # 執行功能並增加使用次數
+    if mode == "daily_fortune":
+        increment_usage(user_id)
+        handle_daily_fortune(event, remaining - 1)
     elif mode == "tarot":
-        # 塔羅牌模式
-        start_tarot_reading(event, user_id, user_message)
+        increment_usage(user_id)
+        start_tarot_reading(event, user_id, user_message, remaining - 1)
     elif mode == "text_only":
-        # 純文字模式
-        handle_text_only(event, user_message)
+        increment_usage(user_id)
+        handle_text_only(event, user_message, remaining - 1)
     else:
-        # 完整圖文模式
-        handle_full_mode(event, user_message)
+        increment_usage(user_id)
+        handle_full_mode(event, user_message, remaining - 1)
 
 
-def handle_daily_fortune(event):
+def handle_daily_fortune(event, remaining: int = 0):
     """
     處理每日幸運指數
     """
@@ -421,7 +490,7 @@ def handle_daily_fortune(event):
 ⚠️ {fortune.get('warning', '避免衝動行事')}
 
 ━━━━━━━━━━━━━━━━
-🔮 想深入了解請輸入具體問題"""
+📊 今日剩餘免費次數：{remaining} 次"""
     
     # 加上快速操作按鈕
     quick_reply = QuickReply(items=[
@@ -462,7 +531,7 @@ def reply_with_quick_actions(event, text: str):
         )
 
 
-def start_tarot_reading(event, user_id: str, question: str):
+def start_tarot_reading(event, user_id: str, question: str, remaining: int = 0):
     """
     開始塔羅牌占卜：抽三張牌讓使用者選
     """
@@ -478,10 +547,11 @@ def start_tarot_reading(event, user_id: str, question: str):
     user_states[user_id] = {
         "mode": "selecting",
         "question": clean_question,
-        "cards": cards
+        "cards": cards,
+        "remaining": remaining
     }
     
-    reply_text = """🔮 塔羅牌占卜開始...
+    reply_text = f"""🔮 塔羅牌占卜開始...
 
 吾已為汝抽出三張命運之牌，
 請閉眼深呼吸，憑直覺選擇：
@@ -489,7 +559,9 @@ def start_tarot_reading(event, user_id: str, question: str):
   🃏        🃏        🃏
 第一張    第二張    第三張
 
-請選擇你的命運之牌 ⬇️"""
+請選擇你的命運之牌 ⬇️
+
+📊 今日剩餘免費次數：{remaining} 次"""
     
     quick_reply = QuickReply(items=[
         QuickReplyItem(action=MessageAction(label="🃏 第一張", text="1")),
@@ -569,7 +641,7 @@ def handle_card_selection(event, user_id: str, selection: str):
     reply_user(event.reply_token, full_reply, image_url)
 
 
-def handle_text_only(event, user_message: str):
+def handle_text_only(event, user_message: str, remaining: int = 0):
     """
     純文字模式（快速回覆）
     """
@@ -580,6 +652,7 @@ def handle_text_only(event, user_message: str):
         return
     
     text_reply = ai_result.get("reply", ERROR_MESSAGE)
+    text_reply += f"\n\n━━━━━━━━━━━━━━━━\n📊 今日剩餘免費次數：{remaining} 次"
     
     # 加上快速操作
     quick_reply = QuickReply(items=[
@@ -598,11 +671,10 @@ def handle_text_only(event, user_message: str):
         )
 
 
-def handle_full_mode(event, user_message: str):
+def handle_full_mode(event, user_message: str, remaining: int = 0):
     """
     完整圖文模式
     """
-    # 先發送等待訊息... 這裡直接處理
     ai_result = ask_openai(user_message)
     
     if ai_result is None:
@@ -610,6 +682,8 @@ def handle_full_mode(event, user_message: str):
         return
     
     text_reply = ai_result.get("reply", ERROR_MESSAGE)
+    text_reply += f"\n\n━━━━━━━━━━━━━━━━\n📊 今日剩餘免費次數：{remaining} 次"
+    
     image_prompt = ai_result.get("image_prompt", "")
     
     image_url = None
