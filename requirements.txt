@@ -1,0 +1,17 @@
+# Flask 網頁框架
+flask>=3.0.0
+
+# Line Bot SDK v3
+line-bot-sdk>=3.5.0
+
+# Google Gemini AI
+google-generativeai>=0.5.0
+
+# Replicate (圖片生成)
+replicate>=0.25.0
+
+# 環境變數管理
+python-dotenv>=1.0.0
+
+# WSGI 伺服器 (Render 部署用)
+gunicorn>=21.0.0
