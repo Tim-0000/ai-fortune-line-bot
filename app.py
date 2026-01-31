@@ -192,11 +192,22 @@ user_states = {}
 DAILY_FREE_LIMIT = 3  # 每日免費次數
 user_usage = {}  # {user_id: {"date": "2024-02-01", "count": 3}}
 
+# ===== VIP 白名單（無限使用）=====
+# 把你的 Line User ID 加在這裡
+VIP_USERS = [
+    # 你的 User ID 會在 Render Logs 中顯示
+    # 格式像是：U1234567890abcdef...
+]
+
 def check_usage_limit(user_id: str) -> tuple:
     """
     檢查使用者是否超過每日限制
-    Returns: (是否可用, 剩餘次數)
+    Returns: (是否可用, 剩餘次數, 是否VIP)
     """
+    # VIP 用戶無限使用
+    if user_id in VIP_USERS:
+        return (True, 999, True)
+    
     from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
     
@@ -211,7 +222,7 @@ def check_usage_limit(user_id: str) -> tuple:
         user_data = user_usage[user_id]
     
     remaining = DAILY_FREE_LIMIT - user_data["count"]
-    return (remaining > 0, remaining)
+    return (remaining > 0, remaining, False)
 
 def increment_usage(user_id: str):
     """
@@ -435,29 +446,30 @@ def handle_text_message(event: MessageEvent):
         return
     
     # 付費功能（檢查次數限制）
-    can_use, remaining = check_usage_limit(user_id)
+    can_use, remaining, is_vip = check_usage_limit(user_id)
     
     if not can_use:
         # 超過限制，顯示提示
         reply_with_quick_actions(event, LIMIT_MESSAGE)
         return
     
-    # 執行功能並增加使用次數
+    # VIP 用戶不計次數，一般用戶增加次數
+    if not is_vip:
+        increment_usage(user_id)
+        remaining = remaining - 1
+    
+    # 執行功能
     if mode == "daily_fortune":
-        increment_usage(user_id)
-        handle_daily_fortune(event, remaining - 1)
+        handle_daily_fortune(event, remaining, is_vip)
     elif mode == "tarot":
-        increment_usage(user_id)
-        start_tarot_reading(event, user_id, user_message, remaining - 1)
+        start_tarot_reading(event, user_id, user_message, remaining, is_vip)
     elif mode == "text_only":
-        increment_usage(user_id)
-        handle_text_only(event, user_message, remaining - 1)
+        handle_text_only(event, user_message, remaining, is_vip)
     else:
-        increment_usage(user_id)
-        handle_full_mode(event, user_message, remaining - 1)
+        handle_full_mode(event, user_message, remaining, is_vip)
 
 
-def handle_daily_fortune(event, remaining: int = 0):
+def handle_daily_fortune(event, remaining: int = 0, is_vip: bool = False):
     """
     處理每日幸運指數
     """
@@ -487,10 +499,13 @@ def handle_daily_fortune(event, remaining: int = 0):
 ━━━━ 今日提醒 ━━━━
 💡 {fortune.get('advice', '今日宜靜心養氣，待機而動。')}
 
-⚠️ {fortune.get('warning', '避免衝動行事')}
-
-━━━━━━━━━━━━━━━━
-📊 今日剩餘免費次數：{remaining} 次"""
+⚠️ {fortune.get('warning', '避免衝動行事')}"""
+    
+    # VIP 顯示不同訊息
+    if is_vip:
+        reply_text += "\n\n━━━━━━━━━━━━━━━━\n👑 VIP 無限使用中"
+    else:
+        reply_text += f"\n\n━━━━━━━━━━━━━━━━\n📊 今日剩餘免費次數：{remaining} 次"
     
     # 加上快速操作按鈕
     quick_reply = QuickReply(items=[
@@ -531,7 +546,7 @@ def reply_with_quick_actions(event, text: str):
         )
 
 
-def start_tarot_reading(event, user_id: str, question: str, remaining: int = 0):
+def start_tarot_reading(event, user_id: str, question: str, remaining: int = 0, is_vip: bool = False):
     """
     開始塔羅牌占卜：抽三張牌讓使用者選
     """
@@ -548,10 +563,11 @@ def start_tarot_reading(event, user_id: str, question: str, remaining: int = 0):
         "mode": "selecting",
         "question": clean_question,
         "cards": cards,
-        "remaining": remaining
+        "remaining": remaining,
+        "is_vip": is_vip
     }
     
-    reply_text = f"""🔮 塔羅牌占卜開始...
+    reply_text = """🔮 塔羅牌占卜開始...
 
 吾已為汝抽出三張命運之牌，
 請閉眼深呼吸，憑直覺選擇：
@@ -559,9 +575,12 @@ def start_tarot_reading(event, user_id: str, question: str, remaining: int = 0):
   🃏        🃏        🃏
 第一張    第二張    第三張
 
-請選擇你的命運之牌 ⬇️
-
-📊 今日剩餘免費次數：{remaining} 次"""
+請選擇你的命運之牌 ⬇️"""
+    
+    if is_vip:
+        reply_text += "\n\n👑 VIP 無限使用中"
+    else:
+        reply_text += f"\n\n📊 今日剩餘免費次數：{remaining} 次"
     
     quick_reply = QuickReply(items=[
         QuickReplyItem(action=MessageAction(label="🃏 第一張", text="1")),
@@ -641,7 +660,7 @@ def handle_card_selection(event, user_id: str, selection: str):
     reply_user(event.reply_token, full_reply, image_url)
 
 
-def handle_text_only(event, user_message: str, remaining: int = 0):
+def handle_text_only(event, user_message: str, remaining: int = 0, is_vip: bool = False):
     """
     純文字模式（快速回覆）
     """
@@ -652,7 +671,11 @@ def handle_text_only(event, user_message: str, remaining: int = 0):
         return
     
     text_reply = ai_result.get("reply", ERROR_MESSAGE)
-    text_reply += f"\n\n━━━━━━━━━━━━━━━━\n📊 今日剩餘免費次數：{remaining} 次"
+    
+    if is_vip:
+        text_reply += "\n\n━━━━━━━━━━━━━━━━\n👑 VIP 無限使用中"
+    else:
+        text_reply += f"\n\n━━━━━━━━━━━━━━━━\n📊 今日剩餘免費次數：{remaining} 次"
     
     # 加上快速操作
     quick_reply = QuickReply(items=[
@@ -671,7 +694,7 @@ def handle_text_only(event, user_message: str, remaining: int = 0):
         )
 
 
-def handle_full_mode(event, user_message: str, remaining: int = 0):
+def handle_full_mode(event, user_message: str, remaining: int = 0, is_vip: bool = False):
     """
     完整圖文模式
     """
@@ -682,7 +705,11 @@ def handle_full_mode(event, user_message: str, remaining: int = 0):
         return
     
     text_reply = ai_result.get("reply", ERROR_MESSAGE)
-    text_reply += f"\n\n━━━━━━━━━━━━━━━━\n📊 今日剩餘免費次數：{remaining} 次"
+    
+    if is_vip:
+        text_reply += "\n\n━━━━━━━━━━━━━━━━\n👑 VIP 無限使用中"
+    else:
+        text_reply += f"\n\n━━━━━━━━━━━━━━━━\n📊 今日剩餘免費次數：{remaining} 次"
     
     image_prompt = ai_result.get("image_prompt", "")
     
