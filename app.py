@@ -21,13 +21,15 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
     ImageMessage,
-    TemplateMessage,
-    ButtonsTemplate,
-    MessageAction,
     QuickReply,
-    QuickReplyItem
+    QuickReplyItem,
+    MessageAction
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import (
+    MessageEvent,
+    TextMessageContent,
+    FollowEvent
+)
 from linebot.v3.exceptions import InvalidSignatureError
 
 # OpenAI
@@ -53,6 +55,61 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ===== 初始化 OpenAI =====
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# ===== 歡迎訊息 =====
+WELCOME_MESSAGE = """🔮 歡迎來到【玄天上師】命理殿堂
+
+吾乃玄天上師，專為有緣人解惑指引。
+
+━━━━━━━━━━━━━━━━
+📖 使用方式：
+
+🌟 直接提問（快速回覆）
+   → 我最近財運如何？
+
+🎴 塔羅占卜（抽牌互動）
+   → 占卜 感情運勢
+   → 抽牌
+
+🖼️ 附圖回覆（較慢）
+   → 要圖 事業運勢
+
+❓ 查看說明
+   → 說明
+━━━━━━━━━━━━━━━━
+
+施主有何疑惑，儘管道來。"""
+
+# ===== 使用說明 =====
+HELP_MESSAGE = """📖 【玄天上師】使用說明
+
+━━━━━━━━━━━━━━━━
+🌟 一般問命（純文字，秒回）
+直接輸入問題即可：
+• 我最近運勢如何？
+• 感情方面有什麼建議？
+• 今年事業運怎麼樣？
+
+━━━━━━━━━━━━━━━━
+🎴 塔羅牌占卜（抽牌互動）
+輸入「占卜」或「抽牌」+問題：
+• 占卜 我的感情運
+• 抽牌 財運如何
+• 占卜
+
+系統會抽出三張牌讓你選擇，
+選牌後揭曉命運並生成專屬圖片。
+
+━━━━━━━━━━━━━━━━
+🖼️ 圖文模式（附 AI 繪圖）
+輸入「要圖」或「圖文」+問題：
+• 要圖 我的財運
+• 圖文 感情建議
+
+⚠️ 圖片生成需 15-20 秒
+
+━━━━━━━━━━━━━━━━
+祝施主心想事成 🙏"""
 
 # ===== 塔羅牌定義 =====
 TAROT_CARDS = [
@@ -98,8 +155,8 @@ TAROT_SYSTEM_PROMPT = """你是一位神祕的塔羅牌占卜師，名為「玄�
 # ===== 錯誤回覆訊息 =====
 ERROR_MESSAGE = "🔮 天機訊號干擾中，請稍後再試。"
 
-# ===== 使用者狀態儲存（簡易版，重啟會清空）=====
-user_states = {}  # {user_id: {"mode": "tarot", "question": "...", "cards": [...]}}
+# ===== 使用者狀態儲存 =====
+user_states = {}
 
 
 def ask_openai(user_message: str, system_prompt: str = MASTER_SYSTEM_PROMPT) -> dict:
@@ -165,7 +222,9 @@ def get_reply_mode(message: str) -> str:
     """
     判斷使用者要的回覆模式
     """
-    message_lower = message.lower()
+    # 說明/幫助
+    if any(keyword in message for keyword in ["說明", "幫助", "help", "指令", "怎麼用"]):
+        return "help"
     
     # 塔羅牌模式
     if any(keyword in message for keyword in ["抽牌", "塔羅", "占卜", "抽籤", "抽卡"]):
@@ -206,6 +265,22 @@ def callback():
     return "OK"
 
 
+# ===== 歡迎訊息（加入好友時觸發）=====
+@handler.add(FollowEvent)
+def handle_follow(event: FollowEvent):
+    """
+    當使用者加入好友時，發送歡迎訊息
+    """
+    with ApiClient(configuration) as api_client:
+        messaging_api = MessagingApi(api_client)
+        messaging_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=WELCOME_MESSAGE)]
+            )
+        )
+
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event: MessageEvent):
     """
@@ -223,8 +298,11 @@ def handle_text_message(event: MessageEvent):
     # 判斷回覆模式
     mode = get_reply_mode(user_message)
     
-    if mode == "tarot":
-        # 塔羅牌模式：顯示三張牌讓使用者選
+    if mode == "help":
+        # 顯示使用說明
+        reply_with_quick_actions(event, HELP_MESSAGE)
+    elif mode == "tarot":
+        # 塔羅牌模式
         start_tarot_reading(event, user_id, user_message)
     elif mode == "text_only":
         # 純文字模式
@@ -234,15 +312,34 @@ def handle_text_message(event: MessageEvent):
         handle_full_mode(event, user_message)
 
 
+def reply_with_quick_actions(event, text: str):
+    """
+    回覆訊息並附上快速操作按鈕
+    """
+    quick_reply = QuickReply(items=[
+        QuickReplyItem(action=MessageAction(label="🎴 塔羅占卜", text="占卜")),
+        QuickReplyItem(action=MessageAction(label="🌟 問運勢", text="我最近運勢如何？")),
+        QuickReplyItem(action=MessageAction(label="💰 問財運", text="我的財運如何？")),
+        QuickReplyItem(action=MessageAction(label="💕 問感情", text="我的感情運如何？")),
+    ])
+    
+    with ApiClient(configuration) as api_client:
+        messaging_api = MessagingApi(api_client)
+        messaging_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=text, quick_reply=quick_reply)]
+            )
+        )
+
+
 def start_tarot_reading(event, user_id: str, question: str):
     """
     開始塔羅牌占卜：抽三張牌讓使用者選
     """
-    # 抽三張牌
     cards = draw_three_cards()
     
-    # 儲存使用者狀態
-    # 移除關鍵字，保留問題本身
+    # 清理問題
     clean_question = question
     for keyword in ["抽牌", "塔羅", "占卜", "抽籤", "抽卡"]:
         clean_question = clean_question.replace(keyword, "").strip()
@@ -255,18 +352,16 @@ def start_tarot_reading(event, user_id: str, question: str):
         "cards": cards
     }
     
-    # 建立選牌訊息
-    reply_text = f"""🔮 塔羅牌占卜開始...
+    reply_text = """🔮 塔羅牌占卜開始...
 
-吾已為汝抽出三張命運之牌，請憑直覺選擇一張：
+吾已為汝抽出三張命運之牌，
+請閉眼深呼吸，憑直覺選擇：
 
-🃏 第一張牌
-🃏 第二張牌  
-🃏 第三張牌
+  🃏        🃏        🃏
+第一張    第二張    第三張
 
-請輸入「1」「2」或「3」選擇你的命運之牌。"""
+請選擇你的命運之牌 ⬇️"""
     
-    # 使用 Quick Reply 讓選擇更方便
     quick_reply = QuickReply(items=[
         QuickReplyItem(action=MessageAction(label="🃏 第一張", text="1")),
         QuickReplyItem(action=MessageAction(label="🃏 第二張", text="2")),
@@ -289,41 +384,55 @@ def handle_card_selection(event, user_id: str, selection: str):
     """
     state = user_states.get(user_id)
     if not state:
-        reply_simple(event, "請先輸入「占卜」開始抽牌。")
+        reply_with_quick_actions(event, "請先輸入「占卜」開始抽牌。")
         return
     
-    # 解析選擇
     try:
         choice = int(selection) - 1
         if choice < 0 or choice > 2:
             raise ValueError()
     except:
-        reply_simple(event, "請輸入 1、2 或 3 來選擇牌。")
+        # 如果輸入不是 1-3，給予提示
+        quick_reply = QuickReply(items=[
+            QuickReplyItem(action=MessageAction(label="🃏 第一張", text="1")),
+            QuickReplyItem(action=MessageAction(label="🃏 第二張", text="2")),
+            QuickReplyItem(action=MessageAction(label="🃏 第三張", text="3")),
+        ])
+        with ApiClient(configuration) as api_client:
+            messaging_api = MessagingApi(api_client)
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="請點選下方按鈕選擇牌 ⬇️", quick_reply=quick_reply)]
+                )
+            )
         return
     
-    # 取得選中的牌
     selected_card = state["cards"][choice]
     question = state["question"]
     
-    # 清除使用者狀態
     del user_states[user_id]
     
-    # 呼叫 AI 解讀塔羅牌
+    # AI 解讀
     prompt = f"使用者的問題是：「{question}」\n抽到的塔羅牌是：「{selected_card}」\n請給予塔羅牌解讀。"
-    
     ai_result = ask_openai(prompt, TAROT_SYSTEM_PROMPT)
     
     if ai_result is None:
-        reply_simple(event, ERROR_MESSAGE)
+        reply_with_quick_actions(event, ERROR_MESSAGE)
         return
     
     text_reply = ai_result.get("reply", ERROR_MESSAGE)
     image_prompt = ai_result.get("image_prompt", "")
     
-    # 加上牌面資訊
-    full_reply = f"🎴 你選擇了第 {choice + 1} 張牌\n\n✨ 【{selected_card}】✨\n\n{text_reply}"
+    full_reply = f"""🎴 你選擇了第 {choice + 1} 張牌
+
+✨ 【{selected_card}】✨
+
+{text_reply}
+
+━━━━━━━━━━━━━━━━
+🔮 想再次占卜請輸入「占卜」"""
     
-    # 生成圖片
     image_url = None
     if image_prompt:
         image_url = generate_image(image_prompt)
@@ -338,25 +447,37 @@ def handle_text_only(event, user_message: str):
     ai_result = ask_openai(user_message)
     
     if ai_result is None:
-        reply_simple(event, ERROR_MESSAGE)
+        reply_with_quick_actions(event, ERROR_MESSAGE)
         return
     
     text_reply = ai_result.get("reply", ERROR_MESSAGE)
     
-    # 加上提示
-    text_reply += "\n\n💡 想要附圖請說「要圖」，想抽塔羅牌請說「占卜」"
+    # 加上快速操作
+    quick_reply = QuickReply(items=[
+        QuickReplyItem(action=MessageAction(label="🎴 塔羅占卜", text="占卜")),
+        QuickReplyItem(action=MessageAction(label="🖼️ 附圖回覆", text=f"要圖 {user_message}")),
+        QuickReplyItem(action=MessageAction(label="💕 問感情", text="我的感情運如何？")),
+    ])
     
-    reply_simple(event, text_reply)
+    with ApiClient(configuration) as api_client:
+        messaging_api = MessagingApi(api_client)
+        messaging_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=text_reply, quick_reply=quick_reply)]
+            )
+        )
 
 
 def handle_full_mode(event, user_message: str):
     """
     完整圖文模式
     """
+    # 先發送等待訊息... 這裡直接處理
     ai_result = ask_openai(user_message)
     
     if ai_result is None:
-        reply_simple(event, ERROR_MESSAGE)
+        reply_with_quick_actions(event, ERROR_MESSAGE)
         return
     
     text_reply = ai_result.get("reply", ERROR_MESSAGE)
@@ -367,20 +488,6 @@ def handle_full_mode(event, user_message: str):
         image_url = generate_image(image_prompt)
     
     reply_user(event.reply_token, text_reply, image_url)
-
-
-def reply_simple(event, text: str):
-    """
-    簡單文字回覆
-    """
-    with ApiClient(configuration) as api_client:
-        messaging_api = MessagingApi(api_client)
-        messaging_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=text)]
-            )
-        )
 
 
 def reply_user(reply_token: str, text: str, image_url: str = None):
