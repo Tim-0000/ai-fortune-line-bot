@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 AI 命理大師 Line Bot
-整合 Gemini AI 文字生成 + Replicate 圖片生成
+整合 OpenAI GPT + Replicate 圖片生成
 """
 
 import os
@@ -23,8 +23,8 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from linebot.v3.exceptions import InvalidSignatureError
 
-# Gemini AI
-import google.generativeai as genai
+# OpenAI
+from openai import OpenAI
 
 # Replicate (圖片生成)
 import replicate
@@ -34,7 +34,7 @@ load_dotenv()
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 
 # ===== 初始化 Flask 應用程式 =====
@@ -44,8 +44,8 @@ app = Flask(__name__)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ===== 初始化 Gemini =====
-genai.configure(api_key=GEMINI_API_KEY)
+# ===== 初始化 OpenAI =====
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # 設定命理大師的 System Prompt
 MASTER_SYSTEM_PROMPT = """你是一位神祕且充滿智慧的命理大師，名為「玄天上師」。
@@ -65,19 +65,13 @@ MASTER_SYSTEM_PROMPT = """你是一位神祕且充滿智慧的命理大師，名
 
 請務必只回傳 JSON 格式，不要有其他文字。"""
 
-# 初始化 Gemini 模型
-gemini_model = genai.GenerativeModel(
-    model_name="gemini-pro",
-    system_instruction=MASTER_SYSTEM_PROMPT
-)
-
 # ===== 錯誤回覆訊息 =====
 ERROR_MESSAGE = "🔮 天機訊號干擾中，請稍後再試。"
 
 
-def ask_gemini(user_message: str) -> dict:
+def ask_openai(user_message: str) -> dict:
     """
-    呼叫 Gemini AI 生成命理回覆與圖片提示詞
+    呼叫 OpenAI GPT 生成命理回覆與圖片提示詞
     
     Args:
         user_message: 使用者的問題
@@ -86,9 +80,18 @@ def ask_gemini(user_message: str) -> dict:
         dict: 包含 reply (中文回覆) 和 image_prompt (英文提示詞)
     """
     try:
-        # 發送訊息給 Gemini
-        response = gemini_model.generate_content(user_message)
-        response_text = response.text.strip()
+        # 發送訊息給 OpenAI
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": MASTER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message}
+            ],
+            temperature=0.8,
+            max_tokens=500
+        )
+        
+        response_text = response.choices[0].message.content.strip()
         
         # 嘗試解析 JSON（處理可能的 markdown 格式）
         # 移除可能的 ```json 和 ``` 標記
@@ -99,7 +102,7 @@ def ask_gemini(user_message: str) -> dict:
         return result
     
     except Exception as e:
-        print(f"Gemini 錯誤: {e}")
+        print(f"OpenAI 錯誤: {e}")
         return None
 
 
@@ -171,7 +174,7 @@ def handle_text_message(event: MessageEvent):
     """
     處理文字訊息事件
     1. 接收使用者訊息
-    2. 呼叫 Gemini 生成回覆和圖片提示詞
+    2. 呼叫 OpenAI 生成回覆和圖片提示詞
     3. 呼叫 Replicate 生成圖片
     4. 回傳文字 + 圖片給使用者
     """
@@ -179,19 +182,19 @@ def handle_text_message(event: MessageEvent):
     user_message = event.message.text
     app.logger.info(f"使用者訊息: {user_message}")
     
-    # 呼叫 Gemini 取得回覆
-    gemini_result = ask_gemini(user_message)
+    # 呼叫 OpenAI 取得回覆
+    ai_result = ask_openai(user_message)
     
-    # 如果 Gemini 失敗，回傳錯誤訊息
-    if gemini_result is None:
+    # 如果 OpenAI 失敗，回傳錯誤訊息
+    if ai_result is None:
         reply_user(event.reply_token, ERROR_MESSAGE, None)
         return
     
     # 取得文字回覆和圖片提示詞
-    text_reply = gemini_result.get("reply", ERROR_MESSAGE)
-    image_prompt = gemini_result.get("image_prompt", "")
+    text_reply = ai_result.get("reply", ERROR_MESSAGE)
+    image_prompt = ai_result.get("image_prompt", "")
     
-    app.logger.info(f"Gemini 回覆: {text_reply}")
+    app.logger.info(f"AI 回覆: {text_reply}")
     app.logger.info(f"圖片提示詞: {image_prompt}")
     
     # 呼叫 Replicate 生成圖片
